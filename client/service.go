@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Domune modification: synchronize controller retirement; see DOMUNE-PATCH.md.
 package client
 
 import (
@@ -267,15 +268,15 @@ func (svr *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("login to the server failed: %v. With loginFailExit enabled, no additional retries will be attempted", cancelCause.Err)
 	}
 
-	go svr.keepControllerWorking()
+	go svr.keepControllerWorking(svr.ctl)
 
 	<-svr.ctx.Done()
 	svr.stop()
 	return nil
 }
 
-func (svr *Service) keepControllerWorking() {
-	<-svr.ctl.Done()
+func (svr *Service) keepControllerWorking(control *Control) {
+	<-control.Done()
 
 	// There is a situation where the login is successful but due to certain reasons,
 	// the control immediately exits. It is necessary to limit the frequency of reconnection in this case.
@@ -285,8 +286,11 @@ func (svr *Service) keepControllerWorking() {
 		// loopLoginUntilSuccess is another layer of loop that will continuously attempt to
 		// login to the server until successful.
 		svr.loopLoginUntilSuccess(20*time.Second, false)
-		if svr.ctl != nil {
-			<-svr.ctl.Done()
+		svr.ctlMu.RLock()
+		control := svr.ctl
+		svr.ctlMu.RUnlock()
+		if control != nil {
+			<-control.Done()
 			return false, errors.New("control is closed and try another loop")
 		}
 		// If the control is nil, it means that the login failed and the service is also closed.
@@ -348,6 +352,11 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 		ctl.Run(proxyCfgs, visitorCfgs)
 		// close and replace previous control
 		svr.ctlMu.Lock()
+		if err := svr.ctx.Err(); err != nil {
+			svr.ctlMu.Unlock()
+			ctl.Close()
+			return false, err
+		}
 		if svr.ctl != nil {
 			svr.ctl.Close()
 		}
