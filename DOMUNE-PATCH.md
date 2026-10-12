@@ -18,7 +18,8 @@ The default client connector also exposes `NewConnectorWithOptions` with three
 narrow integration hooks: a per-connection cloned `TLSConfig`, a complete
 `WebsocketURL`, and a raw `DialContext`. The request authority/path/query remain
 independent of the raw socket address and TLS peer identity. An explicit TLS
-configuration is validated before connection success; nil preserves frp's TLS
+configuration is validated before connection success and, for WSS, before
+the WebSocket upgrade; typed hostname and policy errors remain inspectable; nil preserves frp's TLS
 configuration and lazy TCP TLS behavior. `NewConnector` keeps its existing
 signature and defaults. QUIC uses the cloned TLS configuration; raw DialContext
 customization applies to TCP/KCP dialing, including the TCP transport of WS/WSS.

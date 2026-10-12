@@ -275,15 +275,19 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 	if c.options.TLSConfig != nil && tlsEnable {
 		// The normal TCP TLS hook wraps lazily. Callers providing an explicit
 		// identity policy need its rejection before Connect reports success.
+		priority := uint64(math.MaxUint64)
+		if c.cfg.Transport.Protocol == "wss" {
+			// TLS wraps at 100 and the WebSocket upgrade runs at 110.
+			priority = 105
+		}
 		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{
-			Priority: math.MaxUint64,
+			Priority: priority,
 			Hook: func(ctx context.Context, conn net.Conn, _ string) (context.Context, net.Conn, error) {
 				if tlsConn, ok := conn.(*tls.Conn); ok {
 					if err := tlsConn.HandshakeContext(ctx); err != nil {
 						return ctx, nil, err
 					}
 				}
-				// WSS already completed TLS while upgrading to WebSocket.
 				return ctx, conn, nil
 			},
 		}))

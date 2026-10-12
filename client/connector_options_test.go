@@ -100,6 +100,11 @@ func TestConnectorWebsocketOptions(t *testing.T) {
 			if conn, err := c.Connect(); err == nil {
 				conn.Close()
 				t.Fatal("strict TLS accepted invalid identity")
+			} else if tc.name == "wrong-host" {
+				var hostnameError x509.HostnameError
+				if !errors.As(err, &hostnameError) {
+					t.Fatalf("TLS hostname error lost: %v", err)
+				}
 			}
 		})
 	}
@@ -354,5 +359,30 @@ func TestConnectorProxyCancellationUsesRawDialer(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("proxy socket retained")
+	}
+}
+
+func TestConnectorWSSPreservesTLSPolicyError(t *testing.T) {
+	server := httptest.NewTLSServer(websocket.Handler(func(c *websocket.Conn) { _, _ = io.Copy(c, c) }))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	policyError := errors.New("custom TLS policy rejected peer")
+	for _, requestURL := range []string{"wss://gateway.example/domune/frp", "invalid://gateway.example/domune/frp"} {
+		t.Run(requestURL, func(t *testing.T) {
+			c := NewConnectorWithOptions(context.Background(), connectorTestConfig(t, u.Host, "wss"), ConnectorOptions{
+				TLSConfig:    &tls.Config{RootCAs: roots, ServerName: "example.com", VerifyConnection: func(tls.ConnectionState) error { return policyError }},
+				WebsocketURL: requestURL,
+			})
+			defer c.Close()
+			conn, err := c.Connect()
+			if conn != nil {
+				conn.Close()
+			}
+			if !errors.Is(err, policyError) {
+				t.Fatalf("TLS policy must reject before WebSocket negotiation: %v", err)
+			}
+		})
 	}
 }
