@@ -17,6 +17,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -78,18 +79,43 @@ func (c *messageConnector) Close() error {
 
 // defaultConnectorImpl is the default implementation of Connector for normal frpc.
 type defaultConnectorImpl struct {
-	ctx context.Context
-	cfg *v1.ClientCommonConfig
+	ctx     context.Context
+	cfg     *v1.ClientCommonConfig
+	options ConnectorOptions
 
 	muxSession *fmux.Session
 	quicConn   *quic.Conn
 	closeOnce  sync.Once
 }
 
+// ConnectorOptions customizes the default connector without replacing its
+// transport, proxy negotiation or stream multiplexing.
+type ConnectorOptions struct {
+	// TLSConfig replaces the transport TLS configuration when TLS is enabled.
+	// It is cloned for each connection. Nil preserves the normal frp defaults.
+	TLSConfig *tls.Config
+	// WebsocketURL replaces the WebSocket request URL (including HTTP authority,
+	// path and query). It does not change the dial address or TLS ServerName.
+	// Empty preserves the normal frp WebSocket URL.
+	WebsocketURL string
+	// DialContext replaces raw TCP/KCP dialing (including WS/WSS). It does
+	// not replace QUIC dialing. The destination is the proxy address
+	// when configured. Proxy negotiation and transport hooks remain unchanged.
+	// A custom dialer must honor ctx; nil preserves normal upstream dialing.
+	DialContext func(context.Context, string, string) (net.Conn, error)
+}
+
 func NewConnector(ctx context.Context, cfg *v1.ClientCommonConfig) Connector {
+	return NewConnectorWithOptions(ctx, cfg, ConnectorOptions{})
+}
+
+// NewConnectorWithOptions keeps the default frp transport and proxy pipeline,
+// applying only the supplied integration hooks.
+func NewConnectorWithOptions(ctx context.Context, cfg *v1.ClientCommonConfig, options ConnectorOptions) Connector {
 	return &defaultConnectorImpl{
-		ctx: ctx,
-		cfg: cfg,
+		ctx:     ctx,
+		cfg:     cfg,
+		options: options,
 	}
 }
 
@@ -108,7 +134,9 @@ func (c *defaultConnectorImpl) Open() error {
 		if sn == "" {
 			sn = c.cfg.ServerAddr
 		}
-		if lo.FromPtr(c.cfg.Transport.TLS.Enable) {
+		if c.options.TLSConfig != nil {
+			tlsConfig = c.options.TLSConfig.Clone()
+		} else if lo.FromPtr(c.cfg.Transport.TLS.Enable) {
 			tlsConfig, err = transport.NewClientTLSConfig(
 				c.cfg.Transport.TLS.CertFile,
 				c.cfg.Transport.TLS.KeyFile,
@@ -188,7 +216,9 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 	if c.cfg.Transport.Protocol == "wss" {
 		tlsEnable = true
 	}
-	if tlsEnable {
+	if tlsEnable && c.options.TLSConfig != nil {
+		tlsConfig = c.options.TLSConfig.Clone()
+	} else if tlsEnable {
 		sn := c.cfg.Transport.TLS.ServerName
 		if sn == "" {
 			sn = c.cfg.ServerAddr
@@ -215,7 +245,7 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 	switch protocol {
 	case "websocket":
 		protocol = "tcp"
-		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{Hook: netpkg.DialHookWebsocket(protocol, "")}))
+		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{Hook: c.websocketHook(protocol, "")}))
 		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{
 			Hook: netpkg.DialHookCustomTLSHeadByte(tlsConfig != nil, lo.FromPtr(c.cfg.Transport.TLS.DisableCustomTLSFirstByte)),
 		}))
@@ -224,7 +254,7 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 		protocol = "tcp"
 		dialOptions = append(dialOptions, libnet.WithTLSConfigAndPriority(100, tlsConfig))
 		// Make sure that if it is wss, the websocket hook is executed after the tls hook.
-		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{Hook: netpkg.DialHookWebsocket(protocol, tlsConfig.ServerName), Priority: 110}))
+		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{Hook: c.websocketHook(protocol, tlsConfig.ServerName), Priority: 110}))
 	default:
 		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{
 			Hook: netpkg.DialHookCustomTLSHeadByte(tlsConfig != nil, lo.FromPtr(c.cfg.Transport.TLS.DisableCustomTLSFirstByte)),
@@ -242,12 +272,40 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 		libnet.WithProxy(proxyType, addr),
 		libnet.WithProxyAuth(auth),
 	)
+	if c.options.TLSConfig != nil && tlsEnable {
+		// The normal TCP TLS hook wraps lazily. Callers providing an explicit
+		// identity policy need its rejection before Connect reports success.
+		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{
+			Priority: math.MaxUint64,
+			Hook: func(ctx context.Context, conn net.Conn, _ string) (context.Context, net.Conn, error) {
+				if tlsConn, ok := conn.(*tls.Conn); ok {
+					if err := tlsConn.HandshakeContext(ctx); err != nil {
+						return ctx, nil, err
+					}
+				}
+				// WSS already completed TLS while upgrading to WebSocket.
+				return ctx, conn, nil
+			},
+		}))
+	}
+	if c.options.DialContext != nil {
+		dialOptions = append(dialOptions, libnet.WithDialer(func(ctx context.Context, destination string) (net.Conn, error) {
+			return c.options.DialContext(ctx, protocol, destination)
+		}))
+	}
 	conn, err := libnet.DialContext(
 		c.ctx,
 		net.JoinHostPort(c.cfg.ServerAddr, strconv.Itoa(c.cfg.ServerPort)),
 		dialOptions...,
 	)
 	return conn, err
+}
+
+func (c *defaultConnectorImpl) websocketHook(protocol, host string) libnet.AfterHookFunc {
+	if c.options.WebsocketURL != "" {
+		return netpkg.DialHookWebsocketWithURL(c.options.WebsocketURL)
+	}
+	return netpkg.DialHookWebsocket(protocol, host)
 }
 
 func (c *defaultConnectorImpl) Close() error {

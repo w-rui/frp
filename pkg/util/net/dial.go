@@ -2,6 +2,7 @@ package net
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/url"
 
@@ -23,32 +24,39 @@ func DialHookCustomTLSHeadByte(enableTLS bool, disableCustomTLSHeadByte bool) li
 
 func DialHookWebsocket(protocol string, host string) libnet.AfterHookFunc {
 	return func(ctx context.Context, c net.Conn, addr string) (context.Context, net.Conn, error) {
-		if protocol != "wss" {
-			protocol = "ws"
+		scheme := protocol
+		if scheme != "wss" {
+			scheme = "ws"
 		}
-		if host == "" {
-			host = addr
+		authority := host
+		if authority == "" {
+			authority = addr
 		}
-		addr = protocol + "://" + host + FrpWebsocketPath
-		uri, err := url.Parse(addr)
+		return DialHookWebsocketWithURL(scheme+"://"+authority+FrpWebsocketPath)(ctx, c, addr)
+	}
+}
+
+// DialHookWebsocketWithURL uses the supplied WebSocket request URL over an
+// already connected transport. The URL does not select the socket or TLS peer.
+func DialHookWebsocketWithURL(requestURL string) libnet.AfterHookFunc {
+	return func(ctx context.Context, c net.Conn, _ string) (context.Context, net.Conn, error) {
+		uri, err := url.Parse(requestURL)
 		if err != nil {
 			return nil, nil, err
 		}
-
+		if (uri.Scheme != "ws" && uri.Scheme != "wss") || uri.Host == "" {
+			return nil, nil, fmt.Errorf("invalid WebSocket request URL: %q", requestURL)
+		}
 		origin := "http://" + uri.Host
-		cfg, err := websocket.NewConfig(addr, origin)
+		cfg, err := websocket.NewConfig(requestURL, origin)
 		if err != nil {
 			return nil, nil, err
 		}
-
 		conn, err := websocket.NewClient(cfg, c)
 		if err != nil {
 			return nil, nil, err
 		}
-		// The tunnel payload is a raw byte stream (yamux), not UTF-8 text.
-		// Send it as binary frames; otherwise RFC 6455-compliant intermediaries
-		// (e.g. API gateways/reverse proxies) UTF-8-validate the default text
-		// frames and close the connection on invalid bytes.
+		// Tunnel data is a raw byte stream, not UTF-8 text.
 		conn.PayloadType = websocket.BinaryFrame
 		return ctx, conn, nil
 	}

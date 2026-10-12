@@ -13,3 +13,28 @@ The fix was previously carried by Domune as
 `src/runtime/integrations/frp/patches/control-lifecycle.patch`. This repository now
 owns that modification. Domune pins the fork's immutable Go module version and
 checksums; its channel integration uses the original upstream import paths.
+
+The default client connector also exposes `NewConnectorWithOptions` with three
+narrow integration hooks: a per-connection cloned `TLSConfig`, a complete
+`WebsocketURL`, and a raw `DialContext`. The request authority/path/query remain
+independent of the raw socket address and TLS peer identity. An explicit TLS
+configuration is validated before connection success; nil preserves frp's TLS
+configuration and lazy TCP TLS behavior. `NewConnector` keeps its existing
+signature and defaults. QUIC uses the cloned TLS configuration; raw DialContext
+customization applies to TCP/KCP dialing, including the TCP transport of WS/WSS.
+The existing frp/golib proxy negotiation, transport order, binary WebSocket
+frames and multiplexing remain in use.
+
+This connector extension requires the companion golib patch described in that
+repository's `DOMUNE-PATCH.md`: its `WithDialer` hook and socket cancellation guard
+bound the complete proxy/transport handshake without copying proxy protocols.
+The immutable golib revision must be pinned before this branch is published;
+local development uses a temporary module file with a checkout replacement.
+
+Focused verification uses isolated loopback servers and the race detector:
+`go test -modfile=<temporary module file> ./client ./pkg/util/net -race -count=1`.
+Coverage includes default WebSocket path/TLS behavior, strict certificate and
+hostname rejection before success, a WSS path/query/authority independent from
+TLS identity, binary traffic, injected raw dialing through an authenticated HTTP
+proxy, and cancellation/release of stalled proxy and TCP/WSS TLS handshakes.
+No packaging, deployment or platform matrix is part of this verification.
