@@ -76,3 +76,5 @@ require (
 
 // TODO(fatedier): Temporary use the modified version, update to the official version after merging into the official repository.
 replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-20250825093530-d0154be01cd6
+
+replace github.com/fatedier/golib => github.com/w-rui/golib v0.0.0-20261012153346-e6a4963f844b

@@ -29,11 +29,12 @@ frames and multiplexing remain in use.
 This connector extension requires the companion golib patch described in that
 repository's `DOMUNE-PATCH.md`: its `WithDialer` hook and socket cancellation guard
 bound the complete proxy/transport handshake without copying proxy protocols.
-The immutable golib revision must be pinned before this branch is published;
-local development uses a temporary module file with a checkout replacement.
+The dependency is pinned in go.mod to `github.com/w-rui/golib` at
+`v0.0.0-20261012153346-e6a4963f844b`. Consumers must repeat that replacement
+in their root module because Go does not inherit dependency replacements.
 
 Focused verification uses isolated loopback servers and the race detector:
-`go test -modfile=<temporary module file> ./client ./pkg/util/net -race -count=1`.
+`go test ./client ./pkg/util/net -race -count=1`.
 Coverage includes default WebSocket path/TLS behavior, strict certificate and
 hostname rejection before success, a WSS path/query/authority independent from
 TLS identity, binary traffic, injected raw dialing through an authenticated HTTP
